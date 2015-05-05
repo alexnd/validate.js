@@ -1,5 +1,12 @@
 /*
- * validate.js 1.4.1
+ * validate.js 1.4.1, modified by @alexnd :
+ * - Support for pure self-made object as source of validation
+ * - First arg of FormValidator can be null to trigger this behaviour
+ * - Added optional 4-th arg to FormValidator - options hash ( where .obj is the source of validation )
+ * - Added pure objects validation - method .validate()
+ * - Added .setDefaultMessage() and .getDefaultMessages()
+ * - Depends on $.inject (temporary fix added)
+ * 
  * Copyright (c) 2011 - 2014 Rick Harrison, http://rickharrison.me
  * validate.js is open sourced under the MIT license.
  * Portions of validate.js are inspired by CodeIgniter.
@@ -74,9 +81,19 @@
      * @param callback - Function - The callback after validation has been performed.
      *     @argument errors - An array of validation errors
      *     @argument event - The javascript event
+     
+     * MODIFIED by @alexnd
+     * @param ops - Object - optional hash for additional behavior - {
+     *     callbacks : hash of callback functions
+     *     conditionals : hash of conditional functions
+     *     onsubmit : function or null to disable DOM validation
+     *     obj : Object - source object for validation
      */
 
-    var FormValidator = function(formNameOrNode, fields, callback) {
+    var FormValidator = function(formNameOrNode, fields, callback, ops) {
+		//console.log('FormValidator', arguments);
+		if(undefined===ops) var ops = {};
+		this.ops = ops;
         this.callback = callback || defaults.callback;
         this.errors = [];
         this.fields = {};
@@ -84,6 +101,20 @@
         this.messages = {};
         this.handlers = {};
         this.conditionals = {};
+
+		if('object'==typeof ops['callbacks']) {
+			for(var i in ops.callbacks) {
+				if(!ops.callbacks.hasOwnProperty(i)) continue;
+				this.registerCallback(i, ops.callbacks[i]);
+			}
+		}
+
+		if('object'==typeof ops['conditionals']) {
+			for(var i in ops.conditionals) {
+				if(!ops.conditionals.hasOwnProperty(i)) continue;
+				this.registerConditional(i, ops.conditionals[i]);
+			}
+		}
 
         for (var i = 0, fieldLength = fields.length; i < fieldLength; i++) {
             var field = fields[i];
@@ -109,16 +140,16 @@
         /*
          * Attach an event callback for the form submission
          */
-
-        var _onsubmit = this.form.onsubmit;
-
-        this.form.onsubmit = (function(that) {
-            return function(evt) {
-                try {
-                    return that._validateForm(evt) && (_onsubmit === undefined || _onsubmit());
-                } catch(e) {}
-            };
-        })(this);
+		if(undefined===this.ops['obj'] || !(undefined!==this.ops['onsubmit'] && !this.ops.onsubmit)) {
+			var _onsubmit = this.form.onsubmit;
+			this.form.onsubmit = (function(that) {
+				return function(evt) {
+					try {
+						return that._validateForm(evt) && (_onsubmit === undefined || _onsubmit());
+					} catch(e) {}
+				};
+			})(this);
+		}
     },
 
     attributeValue = function (element, attributeName) {
@@ -148,6 +179,26 @@
         // return this for chaining
         return this;
     };
+
+    /*
+     * @public
+	 * modify defaults.messages[]
+     * ADDED by @alexnd
+     */
+
+	FormValidator.prototype.setDefaultMessage = function(id, message) {
+        defaults.messages[id] = message;
+        return this;
+    };
+
+	/*
+     * @public
+	 * return defaults.messages[]
+     * ADDED by @alexnd
+     */
+	FormValidator.prototype.getDefaultMessages = function() {
+		return defaults.messages;
+	};
 
     /*
      * @public
@@ -189,9 +240,15 @@
     /*
      * @private
      * Adds a file to the master fields array
+	 * MODIFIED by alexnd
      */
 
     FormValidator.prototype._addField = function(field, nameValue)  {
+
+		//ADDED by @alexnd
+		if('object'!==typeof field) return;
+		if(undefined===nameValue && undefined!==field['name']) var nameValue = field.name;
+
         this.fields[nameValue] = {
             name: nameValue,
             display: field.display || nameValue,
@@ -210,39 +267,58 @@
      * Runs the validation when the form is submitted.
      */
 
+	
     FormValidator.prototype._validateForm = function(evt) {
         this.errors = [];
 
         for (var key in this.fields) {
             if (this.fields.hasOwnProperty(key)) {
-                var field = this.fields[key] || {},
-                    element = this.form[field.name];
+                var field = this.fields[key] || {};
+				if(undefined===this.ops['obj']) {
+					var element = this.form[field.name];
+					if (element && element !== undefined) {
+						field.id = attributeValue(element, 'id');
+						field.element = element;
+						field.type = (element.length > 0) ? element[0].type : element.type;
+						field.value = attributeValue(element, 'value');
+						field.checked = attributeValue(element, 'checked');
 
-                if (element && element !== undefined) {
-                    field.id = attributeValue(element, 'id');
-                    field.element = element;
-                    field.type = (element.length > 0) ? element[0].type : element.type;
-                    field.value = attributeValue(element, 'value');
-                    field.checked = attributeValue(element, 'checked');
+						/*
+						 * Run through the rules for each field.
+						 * If the field has a depends conditional, only validate the field
+						 * if it passes the custom function
+						 */
 
-                    /*
-                     * Run through the rules for each field.
-                     * If the field has a depends conditional, only validate the field
-                     * if it passes the custom function
-                     */
-
-                    if (field.depends && typeof field.depends === "function") {
-                        if (field.depends.call(this, field)) {
-                            this._validateField(field);
-                        }
-                    } else if (field.depends && typeof field.depends === "string" && this.conditionals[field.depends]) {
-                        if (this.conditionals[field.depends].call(this,field)) {
-                            this._validateField(field);
-                        }
-                    } else {
-                        this._validateField(field);
-                    }
-                }
+						if (field.depends && typeof field.depends === "function") {
+							if (field.depends.call(this, field)) {
+								this._validateField(field);
+							}
+						} else if (field.depends && typeof field.depends === "string" && this.conditionals[field.depends]) {
+							if (this.conditionals[field.depends].call(this,field)) {
+								this._validateField(field);
+							}
+						} else {
+							this._validateField(field);
+						}
+					}
+				} else {
+					field.id = null;
+					field.element = null;
+					field.type = 'var';
+					field.value = this.ops.obj[field.name];
+					field.checked = false;
+					if (field.depends && typeof field.depends === 'function') {
+						if (field.depends.call(this, field)) {
+							this._validateField(field);
+						}
+					} else if (field.depends && typeof field.depends === 'string' && this.conditionals[field.depends]) {
+						if (this.conditionals[field.depends].call(this,field)) {
+							this._validateField(field);
+						}
+					} else {
+						this._validateField(field);
+					}
+				}
             }
         }
 
@@ -253,7 +329,7 @@
         if (this.errors.length > 0) {
             if (evt && evt.preventDefault) {
                 evt.preventDefault();
-            } else if (event) {
+            } else if ('object'===typeof event) {
                 // IE uses the global event variable
                 event.returnValue = false;
             }
@@ -353,6 +429,18 @@
             }
         }
     };
+
+    /*
+     * @public
+     * Run validator in 'object mode'
+	 * ADDED by @alexnd
+     */
+	FormValidator.prototype.validate = function(ops) {
+		if(undefined !== ops) {
+			$.inject(this.ops, ops);
+		}
+		return this._validateForm();
+	};
 
     /*
      * @private
@@ -527,12 +615,14 @@
     };
 
     window.FormValidator = FormValidator;
+    
+	//ADDED by @alexnd
+    if(undefined===window.$) window.$ = {};
+    if(undefined===window.$.inject) window.$.inject = function(dest, src, isown) {
+    	if('object'==typeof dest && 'object'==typeof src) for (var p in src) {
+    		if (undefined!==isown && isown && undefined!==src.hasOwnProperty && !src.hasOwnProperty(p)) continue;
+    		dest[p] = src[p];
+    	}
+    };
 
 })(window, document);
-
-/*
- * Export as a CommonJS module
- */
-if (typeof module !== 'undefined' && module.exports) {
-    module.exports = FormValidator;
-}
